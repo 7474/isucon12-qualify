@@ -1,9 +1,27 @@
 
+using System.Diagnostics;
+using System.Text.RegularExpressions;
+using MySql.Data.MySqlClient;
+
+const string tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql";
+const string initializeScript = "../sql/init.sh";
+const string cookieName = "isuports_session";
+const string RoleAdmin = "admin";
+const string RoleOrganizer = "organizer";
+const string RolePlayer = "player";
+const string RoleNone = "none";
+
+// 正しいテナント名の正規表現
+Regex tenantNameRegexp = new Regex("^[a-z][a-z0-9-]{0,61}[a-z0-9]$");
+// 	adminDB *sqlx.DB
+// 	sqliteDriverName = "sqlite3"
+// )
+
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
 
-var app = builder.Build();
-
-app.Urls.Add("http://*:3000");
+WebApplication app = builder.Build();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -13,102 +31,26 @@ if (app.Environment.IsDevelopment())
 
 // app.UseHttpsRedirection();
 
-var summaries = new[]
+// 環境変数を取得する、なければデフォルト値を返す
+string getEnv(string key, string defaultValue)
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/initialize", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-});
-
-app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+    return Environment.GetEnvironmentVariable(key) ?? defaultValue;
 }
 
-// package isuports
-
-// import (
-// 	"context"
-// 	"database/sql"
-// 	"encoding/csv"
-// 	"errors"
-// 	"fmt"
-// 	"io"
-// 	"net/http"
-// 	"os"
-// 	"os/exec"
-// 	"path/filepath"
-// 	"reflect"
-// 	"regexp"
-// 	"sort"
-// 	"strconv"
-// 	"strings"
-// 	"time"
-
-// 	"github.com/go-sql-driver/mysql"
-// 	"github.com/gofrs/flock"
-// 	"github.com/jmoiron/sqlx"
-// 	"github.com/labstack/echo/v4"
-// 	"github.com/labstack/echo/v4/middleware"
-// 	"github.com/labstack/gommon/log"
-// 	"github.com/lestrrat-go/jwx/v2/jwa"
-// 	"github.com/lestrrat-go/jwx/v2/jwk"
-// 	"github.com/lestrrat-go/jwx/v2/jwt"
-// )
-
-// const (
-// 	tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql"
-// 	initializeScript       = "../sql/init.sh"
-// 	cookieName             = "isuports_session"
-
-// 	RoleAdmin     = "admin"
-// 	RoleOrganizer = "organizer"
-// 	RolePlayer    = "player"
-// 	RoleNone      = "none"
-// )
-
-// var (
-// 	// 正しいテナント名の正規表現
-// 	tenantNameRegexp = regexp.MustCompile(`^[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
-
-// 	adminDB *sqlx.DB
-
-// 	sqliteDriverName = "sqlite3"
-// )
-
-// // 環境変数を取得する、なければデフォルト値を返す
-// func getEnv(key string, defaultValue string) string {
-// 	if val, ok := os.LookupEnv(key); ok {
-// 		return val
-// 	}
-// 	return defaultValue
-// }
-
-// // 管理用DBに接続する
-// func connectAdminDB() (*sqlx.DB, error) {
-// 	config := mysql.NewConfig()
-// 	config.Net = "tcp"
-// 	config.Addr = getEnv("ISUCON_DB_HOST", "127.0.0.1") + ":" + getEnv("ISUCON_DB_PORT", "3306")
-// 	config.User = getEnv("ISUCON_DB_USER", "isucon")
-// 	config.Passwd = getEnv("ISUCON_DB_PASSWORD", "isucon")
-// 	config.DBName = getEnv("ISUCON_DB_NAME", "isuports")
-// 	config.ParseTime = true
-// 	dsn := config.FormatDSN()
-// 	return sqlx.Open("mysql", dsn)
-// }
+// 管理用DBに接続する
+MySqlConnection connectAdminDB()
+{
+    var connectionString = $"server={getEnv("ISUCON_DB_HOST", "127.0.0.1")}:{getEnv("ISUCON_DB_PORT", "3306")};"
+        + $"uid={getEnv("ISUCON_DB_USER", "isucon")};"
+        + $"pwd={getEnv("ISUCON_DB_PASSWORD", "isucon")};"
+        + $"database={getEnv("ISUCON_DB_NAME", "isuports")}";
+    // XXX
+    // config.Net = "tcp"
+    // config.ParseTime = true
+    var connection = new MySqlConnection(connectionString);
+    connection.Open();
+    return connection;
+}
 
 // // テナントDBのパスを返す
 // func tenantDBPath(id int64) string {
@@ -219,8 +161,8 @@ record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 // 	// 全ロール及び未認証でも使えるhandler
 // 	e.GET("/api/me", meHandler)
 
-// 	// ベンチマーカー向けAPI
-// 	e.POST("/initialize", initializeHandler)
+// ベンチマーカー向けAPI
+app.MapPost("/initialize", initializeHandler);
 
 // 	e.HTTPErrorHandler = errorResponseHandler
 
@@ -232,11 +174,17 @@ record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 // 	adminDB.SetMaxOpenConns(10)
 // 	defer adminDB.Close()
 
-// 	port := getEnv("SERVER_APP_PORT", "3000")
+// 	port := 
 // 	e.Logger.Infof("starting isuports server on : %s ...", port)
 // 	serverPort := fmt.Sprintf(":%s", port)
 // 	e.Logger.Fatal(e.Start(serverPort))
 // }
+
+var port = getEnv("SERVER_APP_PORT", "3000");
+app.Urls.Add($"http://*:{port}");
+app.Logger.LogInformation($"starting isuports server on : {port} ...");
+
+app.Run();
 
 // // エラー処理関数
 // func errorResponseHandler(err error, c echo.Context) {
@@ -1640,21 +1588,25 @@ record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 // 	})
 // }
 
-// type InitializeHandlerResult struct {
-// 	Lang string `json:"lang"`
-// }
+// ベンチマーカー向けAPI
+// POST /initialize
+// ベンチマーカーが起動したときに最初に呼ぶ
+// データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
+async Task<SuccessResult<InitializeHandlerResult>> initializeHandler()
+{
+    var p = Process.Start(Path.GetFullPath(initializeScript));
+    await p.WaitForExitAsync();
+    if (p.ExitCode != 0)
+    {
+        var output = await p.StandardOutput.ReadToEndAsync() + await p.StandardError.ReadToEndAsync();
+        throw new Exception($"error {initializeScript}: {p.ExitCode} {output}");
+    }
+    return new SuccessResult<InitializeHandlerResult>(true, new InitializeHandlerResult(
+        Lang: "csharp"
+    ));
+}
 
-// // ベンチマーカー向けAPI
-// // POST /initialize
-// // ベンチマーカーが起動したときに最初に呼ぶ
-// // データベースの初期化などが実行されるため、スキーマを変更した場合などは適宜改変すること
-// func initializeHandler(c echo.Context) error {
-// 	out, err := exec.Command(initializeScript).CombinedOutput()
-// 	if err != nil {
-// 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
-// 	}
-// 	res := InitializeHandlerResult{
-// 		Lang: "go",
-// 	}
-// 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
-// }
+record SuccessResult<T>(bool Status, T Data) { };
+
+record InitializeHandlerResult(string Lang) { };
+
