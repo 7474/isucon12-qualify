@@ -1,10 +1,8 @@
 services:
   webapp:
-    build:
-      context: ./csharp
-      dockerfile: Dockerfile.dev
+    build: ./csharp
     environment:
-      ISUCON_DB_HOST: host.docker.internal
+      ISUCON_DB_HOST: 127.0.0.1
       ISUCON_DB_PORT: 3306
       ISUCON_DB_USER: isucon
       ISUCON_DB_PASSWORD: isucon
