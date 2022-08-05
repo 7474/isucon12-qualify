@@ -174,18 +174,12 @@ app.MapPost("/initialize", initializeHandler);
 // 	adminDB.SetMaxOpenConns(10)
 // 	defer adminDB.Close()
 
-// 	port := 
-// 	e.Logger.Infof("starting isuports server on : %s ...", port)
-// 	serverPort := fmt.Sprintf(":%s", port)
-// 	e.Logger.Fatal(e.Start(serverPort))
-// }
-
 var port = getEnv("SERVER_APP_PORT", "3000");
 app.Urls.Add($"http://*:{port}");
 app.Logger.LogInformation($"starting isuports server on : {port} ...");
 
 app.Run();
-
+// }
 // // エラー処理関数
 // func errorResponseHandler(err error, c echo.Context) {
 // 	c.Logger().Errorf("error at %s: %s", c.Path(), err.Error())

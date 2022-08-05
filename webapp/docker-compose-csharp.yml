@@ -11,7 +11,7 @@ services:
       ISUCON_DB_NAME: isuports
     network_mode: host
     volumes:
-      - ./csharp:/app
+      - ./csharp:/home/isucon/webapp/csharp
       - /home/isucon/webapp/tenant_db:/home/isucon/webapp/tenant_db
       - /home/isucon/webapp/sql:/home/isucon/webapp/sql
       - /home/isucon/webapp/public.pem:/home/isucon/webapp/public.pem:ro
