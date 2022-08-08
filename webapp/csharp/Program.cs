@@ -1,7 +1,13 @@
 
 using System.Diagnostics;
+using System.Net;
 using System.Text.RegularExpressions;
 using MySql.Data.MySqlClient;
+using JWT;
+using JWT.Builder;
+using JWT.Algorithms;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography;
 
 const string tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql";
 const string initializeScript = "../sql/init.sh";
@@ -137,9 +143,9 @@ MySqlConnection connectAdminDB()
 // 	e.Use(middleware.Recover())
 // 	e.Use(SetCacheControlPrivate)
 
-// 	// SaaS管理者向けAPI
-// 	e.POST("/api/admin/tenants/add", tenantsAddHandler)
-// 	e.GET("/api/admin/tenants/billing", tenantsBillingHandler)
+// SaaS管理者向けAPI
+app.MapPost("/api/admin/tenants/add", tenantsAddHandler);
+app.MapGet("/api/admin/tenants/billing", tenantsBillingHandler);
 
 // 	// テナント管理者向けAPI - 参加者追加、一覧、失格
 // 	e.GET("/api/organizer/players", playersListHandler)
@@ -195,110 +201,143 @@ app.Run();
 // 	})
 // }
 
-// type SuccessResult struct {
-// 	Status bool `json:"status"`
-// 	Data   any  `json:"data,omitempty"`
-// }
 
-// type FailureResult struct {
-// 	Status  bool   `json:"status"`
-// 	Message string `json:"message"`
-// }
+// リクエストヘッダをパースしてViewerを返す
+async Task<Viewer> parseViewer(HttpRequest request)
+{
+    var cookie = request.Cookies[cookieName];
 
-// // アクセスしてきた人の情報
-// type Viewer struct {
-// 	role       string
-// 	playerID   string
-// 	tenantName string
-// 	tenantID   int64
-// }
+    if (cookie == null)
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"cookie {cookieName} is not found");
+    }
+    var tokenStr = cookie;
+    app.Logger.LogInformation(tokenStr);
 
-// // リクエストヘッダをパースしてViewerを返す
-// func parseViewer(c echo.Context) (*Viewer, error) {
-// 	cookie, err := c.Request().Cookie(cookieName)
-// 	if err != nil {
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("cookie %s is not found", cookieName),
-// 		)
-// 	}
-// 	tokenStr := cookie.Value
+    // XXX pem が読めねぇ。。。
+    // https://www.scottbrady91.com/c-sharp/pem-loading-in-dotnet-core-and-dotnet
+    var keyFilename = getEnv("ISUCON_JWT_KEY_FILE", "../public.pem");
+    var keysrc = await File.ReadAllTextAsync(keyFilename);
+    var keysrcbytes = await File.ReadAllBytesAsync(keyFilename);
+    var keystr = Regex.Replace(keysrc, "-----.+-----", "").Replace("\r", "").Replace("\n", "");
 
-// 	keyFilename := getEnv("ISUCON_JWT_KEY_FILE", "../public.pem")
-// 	keysrc, err := os.ReadFile(keyFilename)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error os.ReadFile: keyFilename=%s: %w", keyFilename, err)
-// 	}
-// 	key, _, err := jwk.DecodePEM(keysrc)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error jwk.DecodePEM: %w", err)
-// 	}
+    // TODO エラー処理
+    // if err != nil {
+    //     return nil, fmt.Errorf("error os.ReadFile: keyFilename=%s: %w", keyFilename, err)
+    // }
+    app.Logger.LogInformation(keysrc);
+    app.Logger.LogInformation(keystr);
+    // var certificate = new X509Certificate2(Convert.FromBase64String(keystr));
+    // var certificate = new X509Certificate2(keyFilename);
 
-// 	token, err := jwt.Parse(
-// 		[]byte(tokenStr),
-// 		jwt.WithKey(jwa.RS256, key),
-// 	)
-// 	if err != nil {
-// 		return nil, echo.NewHTTPError(http.StatusUnauthorized, fmt.Errorf("error jwt.Parse: %s", err.Error()))
-// 	}
-// 	if token.Subject() == "" {
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("invalid token: subject is not found in token: %s", tokenStr),
-// 		)
-// 	}
+    using var rsa = RSA.Create();
+    // rsa.ImportSubjectPublicKeyInfo(keysrcbytes, out _);
+    rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keystr), out _);
+    // var certificate = new X509Certificate2(keyFilename);
+    // if err != nil {
+    //     return nil, fmt.Errorf("error jwk.DecodePEM: %w", err)
 
-// 	var role string
-// 	tr, ok := token.Get("role")
-// 	if !ok {
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("invalid token: role is not found: %s", tokenStr),
-// 		)
-// 	}
-// 	switch tr {
-// 	case RoleAdmin, RoleOrganizer, RolePlayer:
-// 		role = tr.(string)
-// 	default:
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("invalid token: invalid role: %s", tokenStr),
-// 		)
-// 	}
-// 	// aud は1要素でテナント名がはいっている
-// 	aud := token.Audience()
-// 	if len(aud) != 1 {
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("invalid token: aud field is few or too much: %s", tokenStr),
-// 		)
-// 	}
-// 	tenant, err := retrieveTenantRowFromHeader(c)
-// 	if err != nil {
-// 		if errors.Is(err, sql.ErrNoRows) {
-// 			return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
-// 		}
-// 		return nil, fmt.Errorf("error retrieveTenantRowFromHeader at parseViewer: %w", err)
-// 	}
-// 	if tenant.Name == "admin" && role != RoleAdmin {
-// 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
-// 	}
+    // using var rsa = ECDsa.Create();
+    // rsa.ImportSubjectPublicKeyInfo(keysrcbytes, out _);
+    // rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keystr), out _);
+    // // var certificate = new X509Certificate2(keyFilename);
+    // // if err != nil {
+    // //     return nil, fmt.Errorf("error jwk.DecodePEM: %w", err)
 
-// 	if tenant.Name != aud[0] {
-// 		return nil, echo.NewHTTPError(
-// 			http.StatusUnauthorized,
-// 			fmt.Sprintf("invalid token: tenant name is not match with %s: %s", c.Request().Host, tokenStr),
-// 		)
-// 	}
+    // // // }
+    // var json = JwtBuilder.Create()
+    //                      .WithAlgorithm(new RSA(rsa))
+    //                     //  .WithAlgorithm(new ES256Algorithm(rsa))
+    // // }
+    var json = JwtBuilder.Create()
+                         .WithAlgorithm(new RS256Algorithm(rsa))
+                         .MustVerifySignature()
+                         .Decode(tokenStr);
+    app.Logger.LogInformation(json);
 
-// 	v := &Viewer{
-// 		role:       role,
-// 		playerID:   token.Subject(),
-// 		tenantName: tenant.Name,
-// 		tenantID:   tenant.ID,
-// 	}
-// 	return v, nil
-// }
+    // if err != nil {
+    // return nil, echo.NewHTTPError(http.StatusUnauthorized, fmt.Errorf("error jwt.Parse: %s", err.Error()))
+
+    // }
+    // if token.Subject() == "" {
+    //     return nil, echo.NewHTTPError(
+    //         http.StatusUnauthorized,
+    //         fmt.Sprintf("invalid token: subject is not found in token: %s", tokenStr),
+
+    //     )
+
+    //     }
+
+    // var role string
+    // 	tr, ok := token.Get("role")
+
+    //     if !ok {
+    //     return nil, echo.NewHTTPError(
+    //         http.StatusUnauthorized,
+    //         fmt.Sprintf("invalid token: role is not found: %s", tokenStr),
+
+    //     )
+
+    //     }
+    // switch tr {
+    //     case RoleAdmin, RoleOrganizer, RolePlayer:
+    //         role = tr.(string)
+
+    //     default:
+    //         return nil, echo.NewHTTPError(
+    //             http.StatusUnauthorized,
+    //             fmt.Sprintf("invalid token: invalid role: %s", tokenStr),
+
+    //         )
+
+    //     }
+    // // aud は1要素でテナント名がはいっている
+    // aud:= token.Audience()
+
+    //     if len(aud) != 1 {
+    //     return nil, echo.NewHTTPError(
+    //         http.StatusUnauthorized,
+    //         fmt.Sprintf("invalid token: aud field is few or too much: %s", tokenStr),
+
+    //     )
+
+    //     }
+    // tenant, err:= retrieveTenantRowFromHeader(c)
+
+    //     if err != nil {
+    //     if errors.Is(err, sql.ErrNoRows) {
+    //         return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
+
+    //         }
+    //     return nil, fmt.Errorf("error retrieveTenantRowFromHeader at parseViewer: %w", err)
+
+    //     }
+    // if tenant.Name == "admin" && role != RoleAdmin {
+    //     return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
+
+    //     }
+
+    // if tenant.Name != aud[0] {
+    //     return nil, echo.NewHTTPError(
+    //         http.StatusUnauthorized,
+    //         fmt.Sprintf("invalid token: tenant name is not match with %s: %s", c.Request().Host, tokenStr),
+
+    //     )
+
+    //     }
+
+    // v:= &Viewer{
+    // role: role,
+    // 		playerID: token.Subject(),
+    // 		tenantName: tenant.Name,
+    // 		tenantID: tenant.ID,
+    // 	}
+    var role = "r";
+    var playerID = "p";
+    var tenantName = "t";
+    var tenantId = 1;
+    return new Viewer(role, playerID, tenantName, tenantId);
+}
 
 // func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
 // 	// JWTに入っているテナント名とHostヘッダのテナント名が一致しているか確認
@@ -420,73 +459,100 @@ app.Run();
 // 	return fl, nil
 // }
 
-// type TenantsAddHandlerResult struct {
-// 	Tenant TenantWithBilling `json:"tenant"`
-// }
+// SasS管理者用API
+// テナントを追加する
+// POST /api/admin/tenants/add
+async Task<SuccessResult<InitializeHandlerResult>> tenantsAddHandler(HttpRequest request)
+{
+    //     var p = Process.Start(Path.GetFullPath(initializeScript));
+    //     await p.WaitForExitAsync();
+    //     if (p.ExitCode != 0)
+    //     {
+    //         var output = await p.StandardOutput.ReadToEndAsync() + await p.StandardError.ReadToEndAsync();
+    //         throw new Exception($"error {initializeScript}: {p.ExitCode} {output}");
+    //     }
+    //     return new SuccessResult<InitializeHandlerResult>(true, new InitializeHandlerResult(
+    //         Lang: "csharp"
+    //     ));
+    // }
+    var viewer = await parseViewer(request);
 
-// // SasS管理者用API
-// // テナントを追加する
-// // POST /api/admin/tenants/add
-// func tenantsAddHandler(c echo.Context) error {
-// 	v, err := parseViewer(c)
-// 	if err != nil {
-// 		return fmt.Errorf("error parseViewer: %w", err)
-// 	}
-// 	if v.tenantName != "admin" {
-// 		// admin: SaaS管理者用の特別なテナント名
-// 		return echo.NewHTTPError(
-// 			http.StatusNotFound,
-// 			fmt.Sprintf("%s has not this API", v.tenantName),
-// 		)
-// 	}
-// 	if v.role != RoleAdmin {
-// 		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
-// 	}
+    //     if err != nil {
+    //     return fmt.Errorf("error parseViewer: %w", err)
 
-// 	displayName := c.FormValue("display_name")
-// 	name := c.FormValue("name")
-// 	if err := validateTenantName(name); err != nil {
-// 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-// 	}
+    //     }
+    // if v.tenantName != "admin" {
+    //     // admin: SaaS管理者用の特別なテナント名
+    //     return echo.NewHTTPError(
+    //         http.StatusNotFound,
+    //         fmt.Sprintf("%s has not this API", v.tenantName),
 
-// 	ctx := context.Background()
-// 	now := time.Now().Unix()
-// 	insertRes, err := adminDB.ExecContext(
-// 		ctx,
-// 		"INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-// 		name, displayName, now, now,
-// 	)
-// 	if err != nil {
-// 		if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1062 { // duplicate entry
-// 			return echo.NewHTTPError(http.StatusBadRequest, "duplicate tenant")
-// 		}
-// 		return fmt.Errorf(
-// 			"error Insert tenant: name=%s, displayName=%s, createdAt=%d, updatedAt=%d, %w",
-// 			name, displayName, now, now, err,
-// 		)
-// 	}
+    //     )
 
-// 	id, err := insertRes.LastInsertId()
-// 	if err != nil {
-// 		return fmt.Errorf("error get LastInsertId: %w", err)
-// 	}
-// 	// NOTE: 先にadminDBに書き込まれることでこのAPIの処理中に
-// 	//       /api/admin/tenants/billingにアクセスされるとエラーになりそう
-// 	//       ロックなどで対処したほうが良さそう
-// 	if err := createTenantDB(id); err != nil {
-// 		return fmt.Errorf("error createTenantDB: id=%d name=%s %w", id, name, err)
-// 	}
+    //     }
+    // if v.role != RoleAdmin {
+    //     return echo.NewHTTPError(http.StatusForbidden, "admin role required")
 
-// 	res := TenantsAddHandlerResult{
-// 		Tenant: TenantWithBilling{
-// 			ID:          strconv.FormatInt(id, 10),
-// 			Name:        name,
-// 			DisplayName: displayName,
-// 			BillingYen:  0,
-// 		},
-// 	}
-// 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
-// }
+    //     }
+
+    // displayName:= c.FormValue("display_name")
+
+    //     name:= c.FormValue("name")
+
+    //     if err := validateTenantName(name); err != nil {
+    //     return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+
+    //     }
+
+    // ctx:= context.Background()
+
+    //     now:= time.Now().Unix()
+
+    //     insertRes, err:= adminDB.ExecContext(
+    //         ctx,
+    //         "INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    //         name, displayName, now, now,
+
+    //     )
+
+    //     if err != nil {
+    //     if merr, ok:= err.(*mysql.MySQLError); ok && merr.Number == 1062 { // duplicate entry
+    //         return echo.NewHTTPError(http.StatusBadRequest, "duplicate tenant")
+
+    //         }
+    //     return fmt.Errorf(
+    //         "error Insert tenant: name=%s, displayName=%s, createdAt=%d, updatedAt=%d, %w",
+    //         name, displayName, now, now, err,
+
+    //     )
+
+    //     }
+
+    // id, err:= insertRes.LastInsertId()
+
+    //     if err != nil {
+    //     return fmt.Errorf("error get LastInsertId: %w", err)
+
+    //     }
+    // // NOTE: 先にadminDBに書き込まれることでこのAPIの処理中に
+    // //       /api/admin/tenants/billingにアクセスされるとエラーになりそう
+    // //       ロックなどで対処したほうが良さそう
+    // if err := createTenantDB(id); err != nil {
+    //     return fmt.Errorf("error createTenantDB: id=%d name=%s %w", id, name, err)
+
+    //     }
+
+    // res:= TenantsAddHandlerResult{
+    // Tenant: TenantWithBilling{
+    //     ID: strconv.FormatInt(id, 10),
+    // 			Name: name,
+    // 			DisplayName: displayName,
+    // 			BillingYen: 0,
+    // 		},
+    // 	}
+    // return c.JSON(http.StatusOK, SuccessResult{ Status: true, Data: res})
+    return null;
+}
 
 // // テナント名が規則に沿っているかチェックする
 // func validateTenantName(name string) error {
@@ -591,117 +657,100 @@ app.Run();
 // 	}, nil
 // }
 
-// type TenantWithBilling struct {
-// 	ID          string `json:"id"`
-// 	Name        string `json:"name"`
-// 	DisplayName string `json:"display_name"`
-// 	BillingYen  int64  `json:"billing"`
-// }
 
-// type TenantsBillingHandlerResult struct {
-// 	Tenants []TenantWithBilling `json:"tenants"`
-// }
+// SaaS管理者用API
+// テナントごとの課金レポートを最大10件、テナントのid降順で取得する
+// GET /api/admin/tenants/billing
+// URL引数beforeを指定した場合、指定した値よりもidが小さいテナントの課金レポートを取得する
+async Task tenantsBillingHandler(HttpRequest request)
+{
+    // 	if host := c.Request().Host; host != getEnv("ISUCON_ADMIN_HOSTNAME", "admin.t.isucon.dev") {
+    // 		return echo.NewHTTPError(
+    // 			http.StatusNotFound,
+    // 			fmt.Sprintf("invalid hostname %s", host),
+    // 		)
+    // 	}
 
-// // SaaS管理者用API
-// // テナントごとの課金レポートを最大10件、テナントのid降順で取得する
-// // GET /api/admin/tenants/billing
-// // URL引数beforeを指定した場合、指定した値よりもidが小さいテナントの課金レポートを取得する
-// func tenantsBillingHandler(c echo.Context) error {
-// 	if host := c.Request().Host; host != getEnv("ISUCON_ADMIN_HOSTNAME", "admin.t.isucon.dev") {
-// 		return echo.NewHTTPError(
-// 			http.StatusNotFound,
-// 			fmt.Sprintf("invalid hostname %s", host),
-// 		)
-// 	}
+    // 	ctx := context.Background()
+    // 	if v, err := parseViewer(c); err != nil {
+    // 		return err
+    // 	} else if v.role != RoleAdmin {
+    // 		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
+    // 	}
 
-// 	ctx := context.Background()
-// 	if v, err := parseViewer(c); err != nil {
-// 		return err
-// 	} else if v.role != RoleAdmin {
-// 		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
-// 	}
+    // 	before := c.QueryParam("before")
+    // 	var beforeID int64
+    // 	if before != "" {
+    // 		var err error
+    // 		beforeID, err = strconv.ParseInt(before, 10, 64)
+    // 		if err != nil {
+    // 			return echo.NewHTTPError(
+    // 				http.StatusBadRequest,
+    // 				fmt.Sprintf("failed to parse query parameter 'before': %s", err.Error()),
+    // 			)
+    // 		}
+    // 	}
+    // 	// テナントごとに
+    // 	//   大会ごとに
+    // 	//     scoreが登録されているplayer * 100
+    // 	//     scoreが登録されていないplayerでアクセスした人 * 10
+    // 	//   を合計したものを
+    // 	// テナントの課金とする
+    // 	ts := []TenantRow{}
+    // 	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
+    // 		return fmt.Errorf("error Select tenant: %w", err)
+    // 	}
+    // 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
+    // 	for _, t := range ts {
+    // 		if beforeID != 0 && beforeID <= t.ID {
+    // 			continue
+    // 		}
+    // 		err := func(t TenantRow) error {
+    // 			tb := TenantWithBilling{
+    // 				ID:          strconv.FormatInt(t.ID, 10),
+    // 				Name:        t.Name,
+    // 				DisplayName: t.DisplayName,
+    // 			}
+    // 			tenantDB, err := connectToTenantDB(t.ID)
+    // 			if err != nil {
+    // 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
+    // 			}
+    // 			defer tenantDB.Close()
+    // 			cs := []CompetitionRow{}
+    // 			if err := tenantDB.SelectContext(
+    // 				ctx,
+    // 				&cs,
+    // 				"SELECT * FROM competition WHERE tenant_id=?",
+    // 				t.ID,
+    // 			); err != nil {
+    // 				return fmt.Errorf("failed to Select competition: %w", err)
+    // 			}
+    // 			for _, comp := range cs {
+    // 				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
+    // 				if err != nil {
+    // 					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
+    // 				}
+    // 				tb.BillingYen += report.BillingYen
+    // 			}
+    // 			tenantBillings = append(tenantBillings, tb)
+    // 			return nil
+    // 		}(t)
+    // 		if err != nil {
+    // 			return err
+    // 		}
+    // 		if len(tenantBillings) >= 10 {
+    // 			break
+    // 		}
+    // 	}
+    // 	return c.JSON(http.StatusOK, SuccessResult{
+    // 		Status: true,
+    // 		Data: TenantsBillingHandlerResult{
+    // 			Tenants: tenantBillings,
+    // 		},
+    // 	})
+    return;
+}
 
-// 	before := c.QueryParam("before")
-// 	var beforeID int64
-// 	if before != "" {
-// 		var err error
-// 		beforeID, err = strconv.ParseInt(before, 10, 64)
-// 		if err != nil {
-// 			return echo.NewHTTPError(
-// 				http.StatusBadRequest,
-// 				fmt.Sprintf("failed to parse query parameter 'before': %s", err.Error()),
-// 			)
-// 		}
-// 	}
-// 	// テナントごとに
-// 	//   大会ごとに
-// 	//     scoreが登録されているplayer * 100
-// 	//     scoreが登録されていないplayerでアクセスした人 * 10
-// 	//   を合計したものを
-// 	// テナントの課金とする
-// 	ts := []TenantRow{}
-// 	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
-// 		return fmt.Errorf("error Select tenant: %w", err)
-// 	}
-// 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
-// 	for _, t := range ts {
-// 		if beforeID != 0 && beforeID <= t.ID {
-// 			continue
-// 		}
-// 		err := func(t TenantRow) error {
-// 			tb := TenantWithBilling{
-// 				ID:          strconv.FormatInt(t.ID, 10),
-// 				Name:        t.Name,
-// 				DisplayName: t.DisplayName,
-// 			}
-// 			tenantDB, err := connectToTenantDB(t.ID)
-// 			if err != nil {
-// 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
-// 			}
-// 			defer tenantDB.Close()
-// 			cs := []CompetitionRow{}
-// 			if err := tenantDB.SelectContext(
-// 				ctx,
-// 				&cs,
-// 				"SELECT * FROM competition WHERE tenant_id=?",
-// 				t.ID,
-// 			); err != nil {
-// 				return fmt.Errorf("failed to Select competition: %w", err)
-// 			}
-// 			for _, comp := range cs {
-// 				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
-// 				if err != nil {
-// 					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
-// 				}
-// 				tb.BillingYen += report.BillingYen
-// 			}
-// 			tenantBillings = append(tenantBillings, tb)
-// 			return nil
-// 		}(t)
-// 		if err != nil {
-// 			return err
-// 		}
-// 		if len(tenantBillings) >= 10 {
-// 			break
-// 		}
-// 	}
-// 	return c.JSON(http.StatusOK, SuccessResult{
-// 		Status: true,
-// 		Data: TenantsBillingHandlerResult{
-// 			Tenants: tenantBillings,
-// 		},
-// 	})
-// }
-
-// type PlayerDetail struct {
-// 	ID             string `json:"id"`
-// 	DisplayName    string `json:"display_name"`
-// 	IsDisqualified bool   `json:"is_disqualified"`
-// }
-
-// type PlayersListHandlerResult struct {
-// 	Players []PlayerDetail `json:"players"`
-// }
 
 // // テナント管理者向けAPI
 // // GET /api/organizer/players
@@ -1494,18 +1543,6 @@ app.Run();
 // 	return c.JSON(http.StatusOK, res)
 // }
 
-// type TenantDetail struct {
-// 	Name        string `json:"name"`
-// 	DisplayName string `json:"display_name"`
-// }
-
-// type MeHandlerResult struct {
-// 	Tenant   *TenantDetail `json:"tenant"`
-// 	Me       *PlayerDetail `json:"me"`
-// 	Role     string        `json:"role"`
-// 	LoggedIn bool          `json:"logged_in"`
-// }
-
 // // 共通API
 // // GET /api/me
 // // JWTで認証した結果、テナントやユーザ情報を返す
@@ -1600,7 +1637,38 @@ async Task<SuccessResult<InitializeHandlerResult>> initializeHandler()
     ));
 }
 
+class IsuHttpException : Exception
+{
+    private int Status;
+    public IsuHttpException(HttpStatusCode status, string message) : base(message)
+    {
+        Status = (int)status;
+    }
+}
+
+// アクセスしてきた人の情報
+record Viewer(string role, string playerID, string tenantName, Int64 tenantID) { }
+
+record TenantDetail(string Name, string DisplayName) { }
+
+record TenantWithBilling(string ID, string Name, string DisplayName, Int64 BillingYen) { }
+
+record PlayerDetail(string ID, string DisplayName, bool IsDisqualified) { }
+
 record SuccessResult<T>(bool Status, T Data) { };
+record FailureResult(bool Status, string Message) { };
+
+record MeHandlerResult(TenantDetail Tenant, PlayerDetail Me, string Role, bool LoggedIn) { }
+
+// type TenantsBillingHandlerResult struct {
+// 	Tenants []TenantWithBilling `json:"tenants"`
+// }
+
+// type PlayersListHandlerResult struct {
+// 	Players []PlayerDetail `json:"players"`
+// }
+
+record TenantsAddHandlerResult(TenantWithBilling Tenant) { }
 
 record InitializeHandlerResult(string Lang) { };
 
