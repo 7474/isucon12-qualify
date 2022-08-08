@@ -212,96 +212,52 @@ async Task<Viewer> parseViewer(HttpRequest request)
         throw new IsuHttpException(HttpStatusCode.Unauthorized, $"cookie {cookieName} is not found");
     }
     var tokenStr = cookie;
-    app.Logger.LogInformation(tokenStr);
 
-    // XXX pem が読めねぇ。。。
     // https://www.scottbrady91.com/c-sharp/pem-loading-in-dotnet-core-and-dotnet
+    // https://vcsjones.dev/key-formats-dotnet-3/
     var keyFilename = getEnv("ISUCON_JWT_KEY_FILE", "../public.pem");
     var keysrc = await File.ReadAllTextAsync(keyFilename);
-    var keysrcbytes = await File.ReadAllBytesAsync(keyFilename);
     var keystr = Regex.Replace(keysrc, "-----.+-----", "").Replace("\r", "").Replace("\n", "");
-
+    using var rsa = RSA.Create();
+    rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keystr), out _);
     // TODO エラー処理
     // if err != nil {
     //     return nil, fmt.Errorf("error os.ReadFile: keyFilename=%s: %w", keyFilename, err)
     // }
-    app.Logger.LogInformation(keysrc);
-    app.Logger.LogInformation(keystr);
-    // var certificate = new X509Certificate2(Convert.FromBase64String(keystr));
-    // var certificate = new X509Certificate2(keyFilename);
 
-    using var rsa = RSA.Create();
-    // rsa.ImportSubjectPublicKeyInfo(keysrcbytes, out _);
-    rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keystr), out _);
-    // var certificate = new X509Certificate2(keyFilename);
-    // if err != nil {
-    //     return nil, fmt.Errorf("error jwk.DecodePEM: %w", err)
-
-    // using var rsa = ECDsa.Create();
-    // rsa.ImportSubjectPublicKeyInfo(keysrcbytes, out _);
-    // rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keystr), out _);
-    // // var certificate = new X509Certificate2(keyFilename);
-    // // if err != nil {
-    // //     return nil, fmt.Errorf("error jwk.DecodePEM: %w", err)
-
-    // // // }
-    // var json = JwtBuilder.Create()
-    //                      .WithAlgorithm(new RSA(rsa))
-    //                     //  .WithAlgorithm(new ES256Algorithm(rsa))
-    // // }
-    var json = JwtBuilder.Create()
+    var token = JwtBuilder.Create()
                          .WithAlgorithm(new RS256Algorithm(rsa))
                          .MustVerifySignature()
-                         .Decode(tokenStr);
-    app.Logger.LogInformation(json);
+                         .Decode<Token>(tokenStr);
+    app.Logger.LogInformation(token.ToString());
 
-    // if err != nil {
-    // return nil, echo.NewHTTPError(http.StatusUnauthorized, fmt.Errorf("error jwt.Parse: %s", err.Error()))
+    if (token == null)
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, "error Jwt Decode.");
+    }
+    if (string.IsNullOrEmpty(token.Sub))
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: subject is not found in token: {tokenStr}");
+    }
 
-    // }
-    // if token.Subject() == "" {
-    //     return nil, echo.NewHTTPError(
-    //         http.StatusUnauthorized,
-    //         fmt.Sprintf("invalid token: subject is not found in token: %s", tokenStr),
 
-    //     )
+    if (string.IsNullOrEmpty(token.Role))
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: role is not found: {tokenStr}");
+    }
 
-    //     }
-
-    // var role string
-    // 	tr, ok := token.Get("role")
-
-    //     if !ok {
-    //     return nil, echo.NewHTTPError(
-    //         http.StatusUnauthorized,
-    //         fmt.Sprintf("invalid token: role is not found: %s", tokenStr),
-
-    //     )
-
-    //     }
-    // switch tr {
-    //     case RoleAdmin, RoleOrganizer, RolePlayer:
-    //         role = tr.(string)
-
-    //     default:
-    //         return nil, echo.NewHTTPError(
-    //             http.StatusUnauthorized,
-    //             fmt.Sprintf("invalid token: invalid role: %s", tokenStr),
-
-    //         )
-
-    //     }
-    // // aud は1要素でテナント名がはいっている
-    // aud:= token.Audience()
-
-    //     if len(aud) != 1 {
-    //     return nil, echo.NewHTTPError(
-    //         http.StatusUnauthorized,
-    //         fmt.Sprintf("invalid token: aud field is few or too much: %s", tokenStr),
-
-    //     )
-
-    //     }
+    switch (token.Role)
+    {
+        case RoleAdmin or RoleOrganizer or RolePlayer:
+            break;
+        default:
+            throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: invalid role: {tokenStr}");
+    }
+    // aud は1要素でテナント名がはいっている
+    if (token.Aud.Length != 1) {
+            throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: aud field is few or too much: {tokenStr}");
+    }
+    
     // tenant, err:= retrieveTenantRowFromHeader(c)
 
     //     if err != nil {
@@ -1645,6 +1601,9 @@ class IsuHttpException : Exception
         Status = (int)status;
     }
 }
+
+// {"aud":["admin"],"exp":1659978506,"iss":"isuports","role":"admin","sub":"admin"}
+record Token(string[] Aud, Int64 Exp, string Iss, string Role, string Sub) { }
 
 // アクセスしてきた人の情報
 record Viewer(string role, string playerID, string tenantName, Int64 tenantID) { }
