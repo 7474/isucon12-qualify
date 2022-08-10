@@ -1,16 +1,14 @@
 
+using Dapper;
+using JWT.Algorithms;
+using JWT.Builder;
+using Microsoft.AspNetCore.Http.Json;
+using MySql.Data.MySqlClient;
 using System.Diagnostics;
 using System.Net;
-using System.Text.RegularExpressions;
-using MySql.Data.MySqlClient;
-using JWT;
-using JWT.Builder;
-using JWT.Algorithms;
-using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
-using Dapper;
-using Microsoft.AspNetCore.Http.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 const string tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql";
 const string initializeScript = "../sql/init.sh";
@@ -18,7 +16,7 @@ const string cookieName = "isuports_session";
 const string RoleAdmin = "admin";
 const string RoleOrganizer = "organizer";
 const string RolePlayer = "player";
-const string RoleNone = "none";
+//const string RoleNone = "none";
 
 // 正しいテナント名の正規表現
 Regex tenantNameRegexp = new Regex("^[a-z][a-z0-9-]{0,61}[a-z0-9]$");
@@ -77,11 +75,12 @@ MySqlConnection connectAdminDB()
     return connection;
 }
 
-// // テナントDBのパスを返す
-// func tenantDBPath(id int64) string {
-// 	tenantDBDir := getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db")
-// 	return filepath.Join(tenantDBDir, fmt.Sprintf("%d.db", id))
-// }
+// テナントDBのパスを返す
+string tenantDBPath(Int64 id)
+{
+    var tenantDBDir = getEnv("ISUCON_TENANT_DB_DIR", "../tenant_db");
+    return Path.Join(tenantDBDir, $"{id}.db");
+}
 
 // // テナントDBに接続する
 // func connectToTenantDB(id int64) (*sqlx.DB, error) {
@@ -93,16 +92,19 @@ MySqlConnection connectAdminDB()
 // 	return db, nil
 // }
 
-// // テナントDBを新規に作成する
-// func createTenantDB(id int64) error {
-// 	p := tenantDBPath(id)
+// テナントDBを新規に作成する
+async Task createTenantDB(Int64 id)
+{
+    var path = tenantDBPath(id);
 
-// 	cmd := exec.Command("sh", "-c", fmt.Sprintf("sqlite3 %s < %s", p, tenantDBSchemaFilePath))
-// 	if out, err := cmd.CombinedOutput(); err != nil {
-// 		return fmt.Errorf("failed to exec sqlite3 %s < %s, out=%s: %w", p, tenantDBSchemaFilePath, string(out), err)
-// 	}
-// 	return nil
-// }
+    var p = Process.Start("sh", new string[] { "-c", $"sqlite3 {path} < {tenantDBSchemaFilePath}" });
+    await p.WaitForExitAsync();
+    if (p.ExitCode != 0)
+    {
+        var output = await p.StandardOutput.ReadToEndAsync() + await p.StandardError.ReadToEndAsync();
+        throw new Exception($"failed to exec sqlite3 {path} < {tenantDBSchemaFilePath}, out={output}: {p.ExitCode}");
+    }
+}
 
 // // システム全体で一意なIDを生成する
 // func dispenseID(ctx context.Context) (string, error) {
@@ -324,9 +326,10 @@ TenantRow retrieveTenantRowFromHeader(HttpRequest request)
     var adminDb = connectAdminDB();
     var tenant = adminDb.Query<TenantRow>("SELECT * FROM tenant WHERE name = @Name", new { Name = tenantName }).FirstOrDefault();
 
-    // TODO not found
-    // return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
-    // }
+    if (tenant == null)
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"tenant not found");
+    }
     return tenant;
 }
 
@@ -422,15 +425,10 @@ async Task<SuccessResult<TenantsAddHandlerResult>> tenantsAddHandler(HttpRequest
     {
         throw new IsuHttpException(HttpStatusCode.Forbidden, $"admin role required");
     }
-    app.Logger.LogInformation(string.Join(",", request.Form.Keys));
-    var displayName = request.Form["display_name"].FirstOrDefault();
-    var name = request.Form["name"].FirstOrDefault();
-    app.Logger.LogInformation($"{name}, {displayName}");
+    var displayName = request.Form["display_name"].FirstOrDefault() ?? "";
+    var name = request.Form["name"].FirstOrDefault() ?? "";
 
-    //     if err := validateTenantName(name); err != nil {
-    //     return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-
-    //     }
+    validateTenantName(name);
 
     // ctx:= context.Background()
 
@@ -466,23 +464,14 @@ async Task<SuccessResult<TenantsAddHandlerResult>> tenantsAddHandler(HttpRequest
     //     return fmt.Errorf("error get LastInsertId: %w", err)
 
     //     }
-    // // NOTE: 先にadminDBに書き込まれることでこのAPIの処理中に
-    // //       /api/admin/tenants/billingにアクセスされるとエラーになりそう
-    // //       ロックなどで対処したほうが良さそう
+    // NOTE: 先にadminDBに書き込まれることでこのAPIの処理中に
+    //       /api/admin/tenants/billingにアクセスされるとエラーになりそう
+    //       ロックなどで対処したほうが良さそう
+    await createTenantDB(id);
     // if err := createTenantDB(id); err != nil {
     //     return fmt.Errorf("error createTenantDB: id=%d name=%s %w", id, name, err)
-
     //     }
 
-    // res:= TenantsAddHandlerResult{
-    // Tenant: TenantWithBilling{
-    //     ID: strconv.FormatInt(id, 10),
-    // 			Name: name,
-    // 			DisplayName: displayName,
-    // 			BillingYen: 0,
-    // 		},
-    // 	}
-    // return c.JSON(http.StatusOK, SuccessResult{ Status: true, Data: res})
     var res = new SuccessResult<TenantsAddHandlerResult>(
         Status: true,
         Data: new TenantsAddHandlerResult(
@@ -495,13 +484,15 @@ async Task<SuccessResult<TenantsAddHandlerResult>> tenantsAddHandler(HttpRequest
     return res;
 }
 
-// // テナント名が規則に沿っているかチェックする
-// func validateTenantName(name string) error {
-// 	if tenantNameRegexp.MatchString(name) {
-// 		return nil
-// 	}
-// 	return fmt.Errorf("invalid tenant name: %s", name)
-// }
+// テナント名が規則に沿っているかチェックする
+void validateTenantName(string name)
+{
+    if (tenantNameRegexp.IsMatch(name))
+    {
+        return;
+    }
+    throw new IsuHttpException(HttpStatusCode.BadRequest, $"invalid tenant name: {name}");
+}
 
 // type BillingReport struct {
 // 	CompetitionID     string `json:"competition_id"`
@@ -1613,10 +1604,10 @@ record Viewer(string role, string playerID, string tenantName, Int64 tenantID) {
 record TenantDetail(string Name, string DisplayName) { }
 
 record TenantWithBilling(
-    string ID, 
+    string ID,
     string Name,
-    [property:JsonPropertyName("display_name")] string DisplayName,
-    [property:JsonPropertyName("billing")] Int64 BillingYen)
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("billing")] Int64 BillingYen)
 { }
 
 record PlayerDetail(string ID, string DisplayName, bool IsDisqualified) { }
