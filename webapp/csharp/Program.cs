@@ -8,6 +8,9 @@ using JWT.Builder;
 using JWT.Algorithms;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
+using Dapper;
+using Microsoft.AspNetCore.Http.Json;
+using System.Text.Json.Serialization;
 
 const string tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql";
 const string initializeScript = "../sql/init.sh";
@@ -27,6 +30,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
+builder.Services.Configure<JsonOptions>(options =>
+{
+    options.SerializerOptions.Encoder = null;
+});
+
 WebApplication app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -37,6 +45,15 @@ if (app.Environment.IsDevelopment())
 
 // app.UseHttpsRedirection();
 
+app.Use(async (context, next) =>
+{
+    if (context.GetEndpoint()?.Metadata.GetMetadata<CachePrivateAttribute>() is not null)
+    {
+        context.Response.Headers.CacheControl = new[] { "private" };
+    }
+    await next(context);
+});
+
 // 環境変数を取得する、なければデフォルト値を返す
 string getEnv(string key, string defaultValue)
 {
@@ -46,13 +63,15 @@ string getEnv(string key, string defaultValue)
 // 管理用DBに接続する
 MySqlConnection connectAdminDB()
 {
-    var connectionString = $"server={getEnv("ISUCON_DB_HOST", "127.0.0.1")}:{getEnv("ISUCON_DB_PORT", "3306")};"
-        + $"uid={getEnv("ISUCON_DB_USER", "isucon")};"
-        + $"pwd={getEnv("ISUCON_DB_PASSWORD", "isucon")};"
+    var connectionString = $"server={getEnv("ISUCON_DB_HOST", "127.0.0.1")};"
+        + $"port={getEnv("ISUCON_DB_PORT", "3306")};"
+        + $"user={getEnv("ISUCON_DB_USER", "isucon")};"
+        + $"password={getEnv("ISUCON_DB_PASSWORD", "isucon")};"
         + $"database={getEnv("ISUCON_DB_NAME", "isuports")}";
     // XXX
     // config.Net = "tcp"
     // config.ParseTime = true
+    // app.Logger.LogInformation($"connectionString: {connectionString}");
     var connection = new MySqlConnection(connectionString);
     connection.Open();
     return connection;
@@ -144,7 +163,7 @@ MySqlConnection connectAdminDB()
 // 	e.Use(SetCacheControlPrivate)
 
 // SaaS管理者向けAPI
-app.MapPost("/api/admin/tenants/add", tenantsAddHandler);
+app.MapPost("/api/admin/tenants/add", tenantsAddHandler).WithMetadata(new CachePrivateAttribute());
 app.MapGet("/api/admin/tenants/billing", tenantsBillingHandler);
 
 // 	// テナント管理者向けAPI - 参加者追加、一覧、失格
@@ -201,7 +220,6 @@ app.Run();
 // 	})
 // }
 
-
 // リクエストヘッダをパースしてViewerを返す
 async Task<Viewer> parseViewer(HttpRequest request)
 {
@@ -254,11 +272,12 @@ async Task<Viewer> parseViewer(HttpRequest request)
             throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: invalid role: {tokenStr}");
     }
     // aud は1要素でテナント名がはいっている
-    if (token.Aud.Length != 1) {
-            throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: aud field is few or too much: {tokenStr}");
+    if (token.Aud.Length != 1)
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: aud field is few or too much: {tokenStr}");
     }
-    
-    // tenant, err:= retrieveTenantRowFromHeader(c)
+
+    var tenant = retrieveTenantRowFromHeader(request);
 
     //     if err != nil {
     //     if errors.Is(err, sql.ErrNoRows) {
@@ -268,81 +287,48 @@ async Task<Viewer> parseViewer(HttpRequest request)
     //     return nil, fmt.Errorf("error retrieveTenantRowFromHeader at parseViewer: %w", err)
 
     //     }
-    // if tenant.Name == "admin" && role != RoleAdmin {
-    //     return nil, echo.NewHTTPError(http.StatusUnauthorized, "tenant not found")
+    if (tenant.Name == "admin" && token.Role != RoleAdmin)
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, "tenant not found");
+    }
 
-    //     }
+    if (tenant.Name != token.Aud[0])
+    {
+        throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: tenant name is not match with {request.Host}: {tokenStr}");
+    }
 
-    // if tenant.Name != aud[0] {
-    //     return nil, echo.NewHTTPError(
-    //         http.StatusUnauthorized,
-    //         fmt.Sprintf("invalid token: tenant name is not match with %s: %s", c.Request().Host, tokenStr),
-
-    //     )
-
-    //     }
-
-    // v:= &Viewer{
-    // role: role,
-    // 		playerID: token.Subject(),
-    // 		tenantName: tenant.Name,
-    // 		tenantID: tenant.ID,
-    // 	}
-    var role = "r";
-    var playerID = "p";
-    var tenantName = "t";
-    var tenantId = 1;
-    return new Viewer(role, playerID, tenantName, tenantId);
+    return new Viewer(token.Role, token.Sub, tenant.Name, tenant.Id);
 }
 
-// func retrieveTenantRowFromHeader(c echo.Context) (*TenantRow, error) {
-// 	// JWTに入っているテナント名とHostヘッダのテナント名が一致しているか確認
-// 	baseHost := getEnv("ISUCON_BASE_HOSTNAME", ".t.isucon.dev")
-// 	tenantName := strings.TrimSuffix(c.Request().Host, baseHost)
+TenantRow retrieveTenantRowFromHeader(HttpRequest request)
+{
+    // JWTに入っているテナント名とHostヘッダのテナント名が一致しているか確認
+    var baseHost = getEnv("ISUCON_BASE_HOSTNAME", ".t.isucon.dev");
+    var host = request.Host.ToString();
+    var tenantName = Regex.Replace(host, baseHost + "$", "");
 
-// 	// SaaS管理者用ドメイン
-// 	if tenantName == "admin" {
-// 		return &TenantRow{
-// 			Name:        "admin",
-// 			DisplayName: "admin",
-// 		}, nil
-// 	}
+    // SaaS管理者用ドメイン
+    if (tenantName == "admin")
+    {
+        return new TenantRow(
+            Id: -1,
+            Name: "admin",
+            DisplayName: "admin",
+            CreatedAt: -1,
+            UpdatedAt: -1
+        );
+    }
 
-// 	// テナントの存在確認
-// 	var tenant TenantRow
-// 	if err := adminDB.GetContext(
-// 		context.Background(),
-// 		&tenant,
-// 		"SELECT * FROM tenant WHERE name = ?",
-// 		tenantName,
-// 	); err != nil {
-// 		return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
-// 	}
-// 	return &tenant, nil
-// }
+    // テナントの存在確認
+    // XXX リクエストスコープ
+    var adminDb = connectAdminDB();
+    var tenant = adminDb.Query<TenantRow>("SELECT * FROM tenant WHERE name = @Name", new { Name = tenantName }).FirstOrDefault();
 
-// type TenantRow struct {
-// 	ID          int64  `db:"id"`
-// 	Name        string `db:"name"`
-// 	DisplayName string `db:"display_name"`
-// 	CreatedAt   int64  `db:"created_at"`
-// 	UpdatedAt   int64  `db:"updated_at"`
-// }
-
-// type dbOrTx interface {
-// 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
-// 	SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
-// 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-// }
-
-// type PlayerRow struct {
-// 	TenantID       int64  `db:"tenant_id"`
-// 	ID             string `db:"id"`
-// 	DisplayName    string `db:"display_name"`
-// 	IsDisqualified bool   `db:"is_disqualified"`
-// 	CreatedAt      int64  `db:"created_at"`
-// 	UpdatedAt      int64  `db:"updated_at"`
-// }
+    // TODO not found
+    // return nil, fmt.Errorf("failed to Select tenant: name=%s, %w", tenantName, err)
+    // }
+    return tenant;
+}
 
 // // 参加者を取得する
 // func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
@@ -418,42 +404,28 @@ async Task<Viewer> parseViewer(HttpRequest request)
 // SasS管理者用API
 // テナントを追加する
 // POST /api/admin/tenants/add
-async Task<SuccessResult<InitializeHandlerResult>> tenantsAddHandler(HttpRequest request)
+async Task<SuccessResult<TenantsAddHandlerResult>> tenantsAddHandler(HttpRequest request)
 {
-    //     var p = Process.Start(Path.GetFullPath(initializeScript));
-    //     await p.WaitForExitAsync();
-    //     if (p.ExitCode != 0)
-    //     {
-    //         var output = await p.StandardOutput.ReadToEndAsync() + await p.StandardError.ReadToEndAsync();
-    //         throw new Exception($"error {initializeScript}: {p.ExitCode} {output}");
-    //     }
-    //     return new SuccessResult<InitializeHandlerResult>(true, new InitializeHandlerResult(
-    //         Lang: "csharp"
-    //     ));
-    // }
-    var viewer = await parseViewer(request);
+    var v = await parseViewer(request);
 
     //     if err != nil {
     //     return fmt.Errorf("error parseViewer: %w", err)
 
     //     }
-    // if v.tenantName != "admin" {
-    //     // admin: SaaS管理者用の特別なテナント名
-    //     return echo.NewHTTPError(
-    //         http.StatusNotFound,
-    //         fmt.Sprintf("%s has not this API", v.tenantName),
+    if (v.tenantName != "admin")
+    {
+        // admin: SaaS管理者用の特別なテナント名
+        throw new IsuHttpException(HttpStatusCode.NotFound, $"{v.tenantName} has not this API");
+    }
 
-    //     )
-
-    //     }
-    // if v.role != RoleAdmin {
-    //     return echo.NewHTTPError(http.StatusForbidden, "admin role required")
-
-    //     }
-
-    // displayName:= c.FormValue("display_name")
-
-    //     name:= c.FormValue("name")
+    if (v.role != RoleAdmin)
+    {
+        throw new IsuHttpException(HttpStatusCode.Forbidden, $"admin role required");
+    }
+    app.Logger.LogInformation(string.Join(",", request.Form.Keys));
+    var displayName = request.Form["display_name"].FirstOrDefault();
+    var name = request.Form["name"].FirstOrDefault();
+    app.Logger.LogInformation($"{name}, {displayName}");
 
     //     if err := validateTenantName(name); err != nil {
     //     return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -462,14 +434,18 @@ async Task<SuccessResult<InitializeHandlerResult>> tenantsAddHandler(HttpRequest
 
     // ctx:= context.Background()
 
-    //     now:= time.Now().Unix()
+    var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    //     insertRes, err:= adminDB.ExecContext(
-    //         ctx,
-    //         "INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-    //         name, displayName, now, now,
-
-    //     )
+    // XXX リクエストスコープ
+    var adminDb = connectAdminDB();
+    using var insertCmd = new MySqlCommand(
+        "INSERT INTO tenant (name, display_name, created_at, updated_at) VALUES (@name, @display_name, @created_at, @updated_at)", adminDb);
+    insertCmd.Parameters.AddWithValue("name", name);
+    insertCmd.Parameters.AddWithValue("display_name", displayName);
+    insertCmd.Parameters.AddWithValue("created_at", now);
+    insertCmd.Parameters.AddWithValue("updated_at", now);
+    var insertRes = await insertCmd.ExecuteNonQueryAsync();
+    app.Logger.LogInformation($"insertRes: {insertRes}");
 
     //     if err != nil {
     //     if merr, ok:= err.(*mysql.MySQLError); ok && merr.Number == 1062 { // duplicate entry
@@ -484,7 +460,7 @@ async Task<SuccessResult<InitializeHandlerResult>> tenantsAddHandler(HttpRequest
 
     //     }
 
-    // id, err:= insertRes.LastInsertId()
+    var id = insertCmd.LastInsertedId;
 
     //     if err != nil {
     //     return fmt.Errorf("error get LastInsertId: %w", err)
@@ -507,7 +483,16 @@ async Task<SuccessResult<InitializeHandlerResult>> tenantsAddHandler(HttpRequest
     // 		},
     // 	}
     // return c.JSON(http.StatusOK, SuccessResult{ Status: true, Data: res})
-    return null;
+    var res = new SuccessResult<TenantsAddHandlerResult>(
+        Status: true,
+        Data: new TenantsAddHandlerResult(
+            Tenant: new TenantWithBilling(
+                ID: id.ToString(),
+                Name: name,
+                DisplayName: displayName,
+                BillingYen: 0)));
+    app.Logger.LogInformation(res.Data.Tenant.ToString());
+    return res;
 }
 
 // // テナント名が規則に沿っているかチェックする
@@ -1605,12 +1590,34 @@ class IsuHttpException : Exception
 // {"aud":["admin"],"exp":1659978506,"iss":"isuports","role":"admin","sub":"admin"}
 record Token(string[] Aud, Int64 Exp, string Iss, string Role, string Sub) { }
 
+record TenantRow(Int64 Id, string Name, string DisplayName, Int64 CreatedAt, Int64 UpdatedAt) { }
+
+// type dbOrTx interface {
+// 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+// 	SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+// 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+// }
+
+// type PlayerRow struct {
+// 	TenantID       int64  `db:"tenant_id"`
+// 	ID             string `db:"id"`
+// 	DisplayName    string `db:"display_name"`
+// 	IsDisqualified bool   `db:"is_disqualified"`
+// 	CreatedAt      int64  `db:"created_at"`
+// 	UpdatedAt      int64  `db:"updated_at"`
+// }
+
 // アクセスしてきた人の情報
 record Viewer(string role, string playerID, string tenantName, Int64 tenantID) { }
 
 record TenantDetail(string Name, string DisplayName) { }
 
-record TenantWithBilling(string ID, string Name, string DisplayName, Int64 BillingYen) { }
+record TenantWithBilling(
+    string ID, 
+    string Name,
+    [property:JsonPropertyName("display_name")] string DisplayName,
+    [property:JsonPropertyName("billing")] Int64 BillingYen)
+{ }
 
 record PlayerDetail(string ID, string DisplayName, bool IsDisqualified) { }
 
@@ -1631,3 +1638,4 @@ record TenantsAddHandlerResult(TenantWithBilling Tenant) { }
 
 record InitializeHandlerResult(string Lang) { };
 
+public class CachePrivateAttribute : Attribute { }
