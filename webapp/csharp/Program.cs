@@ -2,14 +2,17 @@
 using Dapper;
 using JWT.Algorithms;
 using JWT.Builder;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.Data.Sqlite;
 using MySql.Data.MySqlClient;
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 const string tenantDBSchemaFilePath = "../sql/tenant/10_schema.sql";
 const string initializeScript = "../sql/init.sh";
@@ -110,31 +113,33 @@ async Task createTenantDB(Int64 id)
     }
 }
 
-// // システム全体で一意なIDを生成する
-// func dispenseID(ctx context.Context) (string, error) {
-// 	var id int64
-// 	var lastErr error
-// 	for i := 0; i < 100; i++ {
-// 		var ret sql.Result
-// 		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
-// 		if err != nil {
-// 			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 { // deadlock
-// 				lastErr = fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-// 				continue
-// 			}
-// 			return "", fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-// 		}
-// 		id, err = ret.LastInsertId()
-// 		if err != nil {
-// 			return "", fmt.Errorf("error ret.LastInsertId: %w", err)
-// 		}
-// 		break
-// 	}
-// 	if id != 0 {
-// 		return fmt.Sprintf("%x", id), nil
-// 	}
-// 	return "", lastErr
-// }
+// システム全体で一意なIDを生成する
+string dispenseID()
+{
+    return Guid.NewGuid().ToString();
+    // 	var id int64
+    // 	var lastErr error
+    // 	for i := 0; i < 100; i++ {
+    // 		var ret sql.Result
+    // 		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
+    // 		if err != nil {
+    // 			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 { // deadlock
+    // 				lastErr = fmt.Errorf("error REPLACE INTO id_generator: %w", err)
+    // 				continue
+    // 			}
+    // 			return "", fmt.Errorf("error REPLACE INTO id_generator: %w", err)
+    // 		}
+    // 		id, err = ret.LastInsertId()
+    // 		if err != nil {
+    // 			return "", fmt.Errorf("error ret.LastInsertId: %w", err)
+    // 		}
+    // 		break
+    // 	}
+    // 	if id != 0 {
+    // 		return fmt.Sprintf("%x", id), nil
+    // 	}
+    // 	return "", lastErr
+}
 
 // // 全APIにCache-Control: privateを設定する
 // func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
@@ -174,7 +179,7 @@ app.MapGet("/api/admin/tenants/billing", tenantsBillingHandler);
 
 // 	// テナント管理者向けAPI - 参加者追加、一覧、失格
 // 	e.GET("/api/organizer/players", playersListHandler)
-// 	e.POST("/api/organizer/players/add", playersAddHandler)
+app.MapPost("/api/organizer/players/add", playersAddHandler);
 // 	e.POST("/api/organizer/player/:player_id/disqualified", playerDisqualifiedHandler)
 
 // 	// テナント管理者向けAPI - 大会管理
@@ -339,14 +344,13 @@ TenantRow retrieveTenantRowFromHeader(HttpRequest request)
     return tenant;
 }
 
-// // 参加者を取得する
-// func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
-// 	var p PlayerRow
-// 	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
-// 		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
-// 	}
-// 	return &p, nil
-// }
+// 参加者を取得する
+PlayerRow retrievePlayer(SqliteConnection tenantDB, string id)
+{
+    return tenantDB.Query<PlayerRow>("SELECT * FROM player WHERE id = @Id", new { Id = id }).First();
+    //return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
+
+}
 
 // // 参加者を認可する
 // // 参加者向けAPIで呼ばれる
@@ -666,68 +670,79 @@ async Task<SuccessResult<TenantsBillingHandlerResult>> tenantsBillingHandler(Htt
 // 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
 // }
 
-// type PlayersAddHandlerResult struct {
-// 	Players []PlayerDetail `json:"players"`
-// }
+// テナント管理者向けAPI
+// GET /api/organizer/players/add
+// テナントに参加者を追加する
+async Task<SuccessResult<PlayersAddHandlerResult>> playersAddHandler(HttpRequest request)
+{
+    var v = await parseViewer(request);
 
-// // テナント管理者向けAPI
-// // GET /api/organizer/players/add
-// // テナントに参加者を追加する
-// func playersAddHandler(c echo.Context) error {
-// 	ctx := context.Background()
-// 	v, err := parseViewer(c)
-// 	if err != nil {
-// 		return fmt.Errorf("error parseViewer: %w", err)
-// 	} else if v.role != RoleOrganizer {
-// 		return echo.NewHTTPError(http.StatusForbidden, "role organizer required")
-// 	}
+    //if err != nil {
+    //    return fmt.Errorf("error parseViewer: %w", err)
 
-// 	tenantDB, err := connectToTenantDB(v.tenantID)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer tenantDB.Close()
+    // }
+    if (v.role != RoleOrganizer)
+    {
+        throw new IsuHttpException(HttpStatusCode.Forbidden, "role organizer required");
+    }
 
-// 	params, err := c.FormParams()
-// 	if err != nil {
-// 		return fmt.Errorf("error c.FormParams: %w", err)
-// 	}
-// 	displayNames := params["display_name[]"]
+    using var tenantDB = connectToTenantDB(v.tenantID);
 
-// 	pds := make([]PlayerDetail, 0, len(displayNames))
-// 	for _, displayName := range displayNames {
-// 		id, err := dispenseID(ctx)
-// 		if err != nil {
-// 			return fmt.Errorf("error dispenseID: %w", err)
-// 		}
+    //if err != nil {
+    //   return err
 
-// 		now := time.Now().Unix()
-// 		if _, err := tenantDB.ExecContext(
-// 			ctx,
-// 			"INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-// 			id, v.tenantID, displayName, false, now, now,
-// 		); err != nil {
-// 			return fmt.Errorf(
-// 				"error Insert player at tenantDB: id=%s, displayName=%s, isDisqualified=%t, createdAt=%d, updatedAt=%d, %w",
-// 				id, displayName, false, now, now, err,
-// 			)
-// 		}
-// 		p, err := retrievePlayer(ctx, tenantDB, id)
-// 		if err != nil {
-// 			return fmt.Errorf("error retrievePlayer: %w", err)
-// 		}
-// 		pds = append(pds, PlayerDetail{
-// 			ID:             p.ID,
-// 			DisplayName:    p.DisplayName,
-// 			IsDisqualified: p.IsDisqualified,
-// 		})
-// 	}
+    //}
 
-// 	res := PlayersAddHandlerResult{
-// 		Players: pds,
-// 	}
-// 	return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
-// }
+    //params, err:= c.FormParams()
+
+    //   if err != nil {
+    //      return fmt.Errorf("error c.FormParams: %w", err)
+
+    //   }
+    var displayNames = request.Form["display_name[]"].ToList();
+    var pds = new List<PlayerDetail>();
+    foreach (var displayName in displayNames)
+    {
+        var id = dispenseID();
+        //if err != nil {
+        //    return fmt.Errorf("error dispenseID: %w", err)
+        // }
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        using var insertCmd = new SqliteCommand("INSERT INTO player " +
+            "(id, tenant_id, display_name, is_disqualified, created_at, updated_at) " +
+            "VALUES (@id, @tenant_id, @display_name, @is_disqualified, @created_at, @updated_at)", tenantDB);
+        insertCmd.Parameters.AddWithValue("id", id);
+        insertCmd.Parameters.AddWithValue("tenant_id", v.tenantID);
+        insertCmd.Parameters.AddWithValue("display_name", displayName);
+        insertCmd.Parameters.AddWithValue("is_disqualified", false);
+        insertCmd.Parameters.AddWithValue("created_at", now);
+        insertCmd.Parameters.AddWithValue("updated_at", now);
+        var insertRes = await insertCmd.ExecuteNonQueryAsync();
+        app.Logger.LogInformation($"insertRes: {insertRes}");
+
+
+        // ); err != nil {
+        //     return fmt.Errorf(
+        //         "error Insert player at tenantDB: id=%s, displayName=%s, isDisqualified=%t, createdAt=%d, updatedAt=%d, %w",
+        //         id, displayName, false, now, now, err,
+        //     )
+        //      }
+        var p = retrievePlayer(tenantDB, id);
+
+        //      if err != nil {
+        //     return fmt.Errorf("error retrievePlayer: %w", err)
+        //      }
+        pds.Add(new PlayerDetail(
+            ID: p.id,
+            DisplayName: p.display_name,
+            IsDisqualified: p.is_disqualified
+            ));
+    }
+    return new SuccessResult<PlayersAddHandlerResult>(
+        Status: true,
+        Data: new PlayersAddHandlerResult(Players: pds));
+}
 
 // type PlayerDisqualifiedHandlerResult struct {
 // 	Player PlayerDetail `json:"player"`
@@ -1531,14 +1546,7 @@ record CompetitionRow(string id, Int64 tenant_id, string title, Int64? finished_
 // 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 // }
 
-// type PlayerRow struct {
-// 	TenantID       int64  `db:"tenant_id"`
-// 	ID             string `db:"id"`
-// 	DisplayName    string `db:"display_name"`
-// 	IsDisqualified bool   `db:"is_disqualified"`
-// 	CreatedAt      int64  `db:"created_at"`
-// 	UpdatedAt      int64  `db:"updated_at"`
-// }
+record PlayerRow(string id, Int64 tenant_id, string display_name, bool is_disqualified, Int64 created_at, Int64 updated_at) { }
 
 record BillingReport(
     [property: JsonPropertyName("competition_id")] string CompetitionID,
@@ -1581,6 +1589,7 @@ record FailureResult(bool Status, string Message) { };
 
 record MeHandlerResult(TenantDetail Tenant, PlayerDetail Me, string Role, bool LoggedIn) { }
 record TenantsBillingHandlerResult(IList<TenantWithBilling> Tenants) { }
+record PlayersAddHandlerResult(IList<PlayerDetail> Players) { }
 record PlayersListHandlerResult(IList<PlayerDetail> Players) { }
 
 record TenantsAddHandlerResult(TenantWithBilling Tenant) { }
