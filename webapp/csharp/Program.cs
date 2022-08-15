@@ -25,9 +25,9 @@ Regex tenantNameRegexp = new Regex("^[a-z][a-z0-9-]{0,61}[a-z0-9]$");
 // 	sqliteDriverName = "sqlite3"
 // )
 
-// XXX https://github.com/DapperLib/Dapper/issues/818
-// record にいい感じにマッピングされない
-Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
+//// XXX https://github.com/DapperLib/Dapper/issues/818
+//// record にいい感じにマッピングされない
+//Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
@@ -293,17 +293,17 @@ async Task<Viewer> parseViewer(HttpRequest request)
     //     return nil, fmt.Errorf("error retrieveTenantRowFromHeader at parseViewer: %w", err)
 
     //     }
-    if (tenant.Name == "admin" && token.Role != RoleAdmin)
+    if (tenant.name == "admin" && token.Role != RoleAdmin)
     {
         throw new IsuHttpException(HttpStatusCode.Unauthorized, "tenant not found");
     }
 
-    if (tenant.Name != token.Aud[0])
+    if (tenant.name != token.Aud[0])
     {
         throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: tenant name is not match with {request.Host}: {tokenStr}");
     }
 
-    return new Viewer(token.Role, token.Sub, tenant.Name, tenant.ID);
+    return new Viewer(token.Role, token.Sub, tenant.name, tenant.id);
 }
 
 TenantRow retrieveTenantRowFromHeader(HttpRequest request)
@@ -313,15 +313,17 @@ TenantRow retrieveTenantRowFromHeader(HttpRequest request)
     var host = request.Host.ToString();
     var tenantName = Regex.Replace(host, baseHost + "$", "");
 
+    app.Logger.LogInformation($"tenantName: {tenantName}");
+
     // SaaS管理者用ドメイン
     if (tenantName == "admin")
     {
         return new TenantRow(
-            ID: -1,
-            Name: "admin",
-            DisplayName: "admin",
-            CreatedAt: -1,
-            UpdatedAt: -1
+            id: -1,
+            name: "admin",
+            display_name: "admin",
+            created_at: -1,
+            updated_at: -1
         );
     }
 
@@ -496,7 +498,7 @@ BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenant
     using var adminDB = connectAdminDB();
     var vhs = adminDB.Query<VisitHistorySummaryRow>(
         "SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = @TenantId AND competition_id = @CompetitionId GROUP BY player_id",
-        new { TenantId = tenantID, CompetitionId = comp.ID }).ToList();
+        new { TenantId = tenantID, CompetitionId = comp.id }).ToList();
 
     //    ); err != nil && err != sql.ErrNoRows {
     //        return nil, fmt.Errorf("error Select visit_history: tenantID=%d, competitionID=%s, %w", tenantID, comp.ID, err)
@@ -506,11 +508,11 @@ BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenant
     foreach (var vh in vhs)
     {
         // competition.finished_atよりもあとの場合は、終了後に訪問したとみなして大会開催内アクセス済みとみなさない
-        if (comp.FinishedAt.HasValue && comp.FinishedAt < vh.MinCreatedAt)
+        if (comp.finished_at.HasValue && comp.finished_at < vh.min_created_at)
         {
             continue;
         }
-        billingMap[vh.PlayerID] = "visitor";
+        billingMap[vh.player_id] = "visitor";
     }
 
     //    // player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
@@ -525,7 +527,7 @@ BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenant
     // スコアを登録した参加者のIDを取得する
     var scoredPlayerIDs = tenantDB.Query<dynamic>(
             "SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = @TenantId AND competition_id = @CompetitionId",
-            new { TenantId = tenantID, CompetitionId = comp.ID }).Select(x => $"{x.player_score}").ToList();
+            new { TenantId = tenantID, CompetitionId = comp.id }).Select(x => $"{x.player_score}").ToList();
 
 
     //); err != nil && err != sql.ErrNoRows {
@@ -541,7 +543,7 @@ BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenant
     //var playerCount, visitorCount int64
     Int64 playerCount = 0;
     Int64 visitorCount = 0;
-    if (comp.FinishedAt.HasValue)
+    if (comp.finished_at.HasValue)
     {
         foreach (var category in billingMap.Values)
         {
@@ -555,8 +557,8 @@ BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenant
         }
     }
     return new BillingReport(
-        CompetitionID: comp.ID,
-        CompetitionTitle: comp.Title,
+        CompetitionID: comp.id,
+        CompetitionTitle: comp.title,
         PlayerCount: playerCount,
         VisitorCount: visitorCount,
         BillingPlayerYen: 100 * playerCount, // スコアを登録した参加者は100円
@@ -601,17 +603,17 @@ async Task<SuccessResult<TenantsBillingHandlerResult>> tenantsBillingHandler(Htt
     var ts = adminDB.Query<TenantRow>("SELECT * FROM tenant ORDER BY id DESC").ToList();
     foreach (var t in ts)
     {
-        if (beforeID != 0 && beforeID <= t.ID) { continue; }
+        if (beforeID != 0 && beforeID <= t.id) { continue; }
         var byen = 0L;
-        using var tenantDB = connectToTenantDB(t.ID);
-        var cs = tenantDB.Query<CompetitionRow>("SELECT * FROM competition WHERE tenant_id=@Id", new { Id = t.ID }).ToList();
+        using var tenantDB = connectToTenantDB(t.id);
+        var cs = tenantDB.Query<CompetitionRow>("SELECT * FROM competition WHERE tenant_id=@Id", new { Id = t.id }).ToList();
         foreach (var comp in cs)
         {
-            var report = billingReportByCompetition(tenantDB, t.ID, comp.ID);
+            var report = billingReportByCompetition(tenantDB, t.id, comp.id);
             byen += report.BillingYen;
         }
 
-        tenantBillings.Add(new TenantWithBilling(ID: t.ID.ToString(), Name: t.Name, DisplayName: t.DisplayName, BillingYen: byen));
+        tenantBillings.Add(new TenantWithBilling(ID: t.id.ToString(), Name: t.name, DisplayName: t.display_name, BillingYen: byen));
         if (tenantBillings.Count > 10) { break; }
     }
 
@@ -1519,9 +1521,9 @@ class IsuHttpException : Exception
 // {"aud":["admin"],"exp":1659978506,"iss":"isuports","role":"admin","sub":"admin"}
 record Token(string[] Aud, Int64 Exp, string Iss, string Role, string Sub) { }
 
-record TenantRow(Int64 ID, string Name, string DisplayName, Int64 CreatedAt, Int64 UpdatedAt) { }
+record TenantRow(Int64 id, string name, string display_name, Int64 created_at, Int64 updated_at) { }
 
-record CompetitionRow(Int64 TenantID, string ID, string Title, Int64? FinishedAt, Int64 CreatedAt, Int64 UpdatedAt) { }
+record CompetitionRow(string id, Int64 tenant_id, string title, Int64? finished_at, Int64 created_at, Int64 updated_at) { }
 
 // type dbOrTx interface {
 // 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
@@ -1553,11 +1555,11 @@ record BillingReport(
     [property: JsonPropertyName("billing_yen")] Int64 BillingYen)
 { }
 
-record VisitHistoryRow(string PlayerID, Int64 TenantID, string CompetitionID, Int64 CreatedAt, Int64 UpdatedAt) { }
+record VisitHistoryRow(string player_id, Int64 tenant_id, string competition_id, Int64 created_at, Int64 updated_at) { }
 
 record VisitHistorySummaryRow(
-    [property: JsonPropertyName("player_id")] string PlayerID,
-    [property: JsonPropertyName("min_created_at")] Int64 MinCreatedAt)
+    [property: JsonPropertyName("player_id")] string player_id,
+    [property: JsonPropertyName("min_created_at")] Int64 min_created_at)
 { }
 
 // アクセスしてきた人の情報
