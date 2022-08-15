@@ -3,6 +3,7 @@ using Dapper;
 using JWT.Algorithms;
 using JWT.Builder;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.Data.Sqlite;
 using MySql.Data.MySqlClient;
 using System.Diagnostics;
 using System.Net;
@@ -23,6 +24,10 @@ Regex tenantNameRegexp = new Regex("^[a-z][a-z0-9-]{0,61}[a-z0-9]$");
 // 	adminDB *sqlx.DB
 // 	sqliteDriverName = "sqlite3"
 // )
+
+// XXX https://github.com/DapperLib/Dapper/issues/818
+// record にいい感じにマッピングされない
+Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
@@ -82,15 +87,14 @@ string tenantDBPath(Int64 id)
     return Path.Join(tenantDBDir, $"{id}.db");
 }
 
-// // テナントDBに接続する
-// func connectToTenantDB(id int64) (*sqlx.DB, error) {
-// 	p := tenantDBPath(id)
-// 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
-// 	}
-// 	return db, nil
-// }
+// テナントDBに接続する
+SqliteConnection connectToTenantDB(Int64 id)
+{
+    var p = tenantDBPath(id);
+    var connection = new SqliteConnection($"Data Source={p}");
+    connection.Open();
+    return connection;
+}
 
 // テナントDBを新規に作成する
 async Task createTenantDB(Int64 id)
@@ -299,7 +303,7 @@ async Task<Viewer> parseViewer(HttpRequest request)
         throw new IsuHttpException(HttpStatusCode.Unauthorized, $"invalid token: tenant name is not match with {request.Host}: {tokenStr}");
     }
 
-    return new Viewer(token.Role, token.Sub, tenant.Name, tenant.Id);
+    return new Viewer(token.Role, token.Sub, tenant.Name, tenant.ID);
 }
 
 TenantRow retrieveTenantRowFromHeader(HttpRequest request)
@@ -313,7 +317,7 @@ TenantRow retrieveTenantRowFromHeader(HttpRequest request)
     if (tenantName == "admin")
     {
         return new TenantRow(
-            Id: -1,
+            ID: -1,
             Name: "admin",
             DisplayName: "admin",
             CreatedAt: -1,
@@ -358,23 +362,12 @@ TenantRow retrieveTenantRowFromHeader(HttpRequest request)
 // 	return nil
 // }
 
-// type CompetitionRow struct {
-// 	TenantID   int64         `db:"tenant_id"`
-// 	ID         string        `db:"id"`
-// 	Title      string        `db:"title"`
-// 	FinishedAt sql.NullInt64 `db:"finished_at"`
-// 	CreatedAt  int64         `db:"created_at"`
-// 	UpdatedAt  int64         `db:"updated_at"`
-// }
 
-// // 大会を取得する
-// func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, id string) (*CompetitionRow, error) {
-// 	var c CompetitionRow
-// 	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE id = ?", id); err != nil {
-// 		return nil, fmt.Errorf("error Select competition: id=%s, %w", id, err)
-// 	}
-// 	return &c, nil
-// }
+// 大会を取得する
+CompetitionRow retrieveCompetition(SqliteConnection tenantDB, string id)
+{
+    return tenantDB.Query<CompetitionRow>("SELECT * FROM competition WHERE id = ?", new { id = id }).First();
+}
 
 // type PlayerScoreRow struct {
 // 	TenantID      int64  `db:"tenant_id"`
@@ -494,193 +487,138 @@ void validateTenantName(string name)
     throw new IsuHttpException(HttpStatusCode.BadRequest, $"invalid tenant name: {name}");
 }
 
-// type BillingReport struct {
-// 	CompetitionID     string `json:"competition_id"`
-// 	CompetitionTitle  string `json:"competition_title"`
-// 	PlayerCount       int64  `json:"player_count"`        // スコアを登録した参加者数
-// 	VisitorCount      int64  `json:"visitor_count"`       // ランキングを閲覧だけした(スコアを登録していない)参加者数
-// 	BillingPlayerYen  int64  `json:"billing_player_yen"`  // 請求金額 スコアを登録した参加者分
-// 	BillingVisitorYen int64  `json:"billing_visitor_yen"` // 請求金額 ランキングを閲覧だけした(スコアを登録していない)参加者分
-// 	BillingYen        int64  `json:"billing_yen"`         // 合計請求金額
-// }
+// 大会ごとの課金レポートを計算する
+BillingReport billingReportByCompetition(SqliteConnection tenantDB, Int64 tenantID, string competitonID)
+{
+    var comp = retrieveCompetition(tenantDB, competitonID);
 
-// type VisitHistoryRow struct {
-// 	PlayerID      string `db:"player_id"`
-// 	TenantID      int64  `db:"tenant_id"`
-// 	CompetitionID string `db:"competition_id"`
-// 	CreatedAt     int64  `db:"created_at"`
-// 	UpdatedAt     int64  `db:"updated_at"`
-// }
+    // ランキングにアクセスした参加者のIDを取得する
+    using var adminDB = connectAdminDB();
+    var vhs = adminDB.Query<VisitHistorySummaryRow>(
+        "SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = @TenantId AND competition_id = @CompetitionId GROUP BY player_id",
+        new { TenantId = tenantID, CompetitionId = comp.ID }).ToList();
 
-// type VisitHistorySummaryRow struct {
-// 	PlayerID     string `db:"player_id"`
-// 	MinCreatedAt int64  `db:"min_created_at"`
-// }
+    //    ); err != nil && err != sql.ErrNoRows {
+    //        return nil, fmt.Errorf("error Select visit_history: tenantID=%d, competitionID=%s, %w", tenantID, comp.ID, err)
 
-// // 大会ごとの課金レポートを計算する
-// func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID int64, competitonID string) (*BillingReport, error) {
-// 	comp, err := retrieveCompetition(ctx, tenantDB, competitonID)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
-// 	}
+    //     }
+    var billingMap = new Dictionary<string, string>();
+    foreach (var vh in vhs)
+    {
+        // competition.finished_atよりもあとの場合は、終了後に訪問したとみなして大会開催内アクセス済みとみなさない
+        if (comp.FinishedAt.HasValue && comp.FinishedAt < vh.MinCreatedAt)
+        {
+            continue;
+        }
+        billingMap[vh.PlayerID] = "visitor";
+    }
 
-// 	// ランキングにアクセスした参加者のIDを取得する
-// 	vhs := []VisitHistorySummaryRow{}
-// 	if err := adminDB.SelectContext(
-// 		ctx,
-// 		&vhs,
-// 		"SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id",
-// 		tenantID,
-// 		comp.ID,
-// 	); err != nil && err != sql.ErrNoRows {
-// 		return nil, fmt.Errorf("error Select visit_history: tenantID=%d, competitionID=%s, %w", tenantID, comp.ID, err)
-// 	}
-// 	billingMap := map[string]string{}
-// 	for _, vh := range vhs {
-// 		// competition.finished_atよりもあとの場合は、終了後に訪問したとみなして大会開催内アクセス済みとみなさない
-// 		if comp.FinishedAt.Valid && comp.FinishedAt.Int64 < vh.MinCreatedAt {
-// 			continue
-// 		}
-// 		billingMap[vh.PlayerID] = "visitor"
-// 	}
+    //    // player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
+    //    fl, err:= flockByTenantID(tenantID)
 
-// 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
-// 	fl, err := flockByTenantID(tenantID)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error flockByTenantID: %w", err)
-// 	}
-// 	defer fl.Close()
+    //     if err != nil {
+    //        return nil, fmt.Errorf("error flockByTenantID: %w", err)
 
-// 	// スコアを登録した参加者のIDを取得する
-// 	scoredPlayerIDs := []string{}
-// 	if err := tenantDB.SelectContext(
-// 		ctx,
-// 		&scoredPlayerIDs,
-// 		"SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = ? AND competition_id = ?",
-// 		tenantID, comp.ID,
-// 	); err != nil && err != sql.ErrNoRows {
-// 		return nil, fmt.Errorf("error Select count player_score: tenantID=%d, competitionID=%s, %w", tenantID, competitonID, err)
-// 	}
-// 	for _, pid := range scoredPlayerIDs {
-// 		// スコアが登録されている参加者
-// 		billingMap[pid] = "player"
-// 	}
+    //     }
+    //    defer fl.Close()
 
-// 	// 大会が終了している場合のみ請求金額が確定するので計算する
-// 	var playerCount, visitorCount int64
-// 	if comp.FinishedAt.Valid {
-// 		for _, category := range billingMap {
-// 			switch category {
-// 			case "player":
-// 				playerCount++
-// 			case "visitor":
-// 				visitorCount++
-// 			}
-// 		}
-// 	}
-// 	return &BillingReport{
-// 		CompetitionID:     comp.ID,
-// 		CompetitionTitle:  comp.Title,
-// 		PlayerCount:       playerCount,
-// 		VisitorCount:      visitorCount,
-// 		BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
-// 		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
-// 		BillingYen:        100*playerCount + 10*visitorCount,
-// 	}, nil
-// }
+    // スコアを登録した参加者のIDを取得する
+    var scoredPlayerIDs = tenantDB.Query<dynamic>(
+            "SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = @TenantId AND competition_id = @CompetitionId",
+            new { TenantId = tenantID, CompetitionId = comp.ID }).Select(x => $"{x.player_score}").ToList();
+
+
+    //); err != nil && err != sql.ErrNoRows {
+    //return nil, fmt.Errorf("error Select count player_score: tenantID=%d, competitionID=%s, %w", tenantID, competitonID, err)
+
+    foreach (var pid in scoredPlayerIDs)
+    {
+        // スコアが登録されている参加者
+        billingMap[pid] = "player";
+    }
+
+    // 大会が終了している場合のみ請求金額が確定するので計算する
+    //var playerCount, visitorCount int64
+    Int64 playerCount = 0;
+    Int64 visitorCount = 0;
+    if (comp.FinishedAt.HasValue)
+    {
+        foreach (var category in billingMap.Values)
+        {
+            switch (category)
+            {
+                case "player":
+                    playerCount++; break;
+                case "visitor":
+                    visitorCount++; break;
+            }
+        }
+    }
+    return new BillingReport(
+        CompetitionID: comp.ID,
+        CompetitionTitle: comp.Title,
+        PlayerCount: playerCount,
+        VisitorCount: visitorCount,
+        BillingPlayerYen: 100 * playerCount, // スコアを登録した参加者は100円
+        BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
+        BillingYen: 100 * playerCount + 10 * visitorCount
+    );
+}
 
 
 // SaaS管理者用API
 // テナントごとの課金レポートを最大10件、テナントのid降順で取得する
 // GET /api/admin/tenants/billing
 // URL引数beforeを指定した場合、指定した値よりもidが小さいテナントの課金レポートを取得する
-async Task tenantsBillingHandler(HttpRequest request)
+async Task<SuccessResult<TenantsBillingHandlerResult>> tenantsBillingHandler(HttpRequest request)
 {
-    // 	if host := c.Request().Host; host != getEnv("ISUCON_ADMIN_HOSTNAME", "admin.t.isucon.dev") {
-    // 		return echo.NewHTTPError(
-    // 			http.StatusNotFound,
-    // 			fmt.Sprintf("invalid hostname %s", host),
-    // 		)
-    // 	}
+    var host = request.Host.ToString();
+    if (host != getEnv("isucon_admin_hostname", "admin.t.isucon.dev"))
+    {
+        throw new IsuHttpException(HttpStatusCode.NotFound, $"invalid hostname {host}");
+    }
 
-    // 	ctx := context.Background()
-    // 	if v, err := parseViewer(c); err != nil {
-    // 		return err
-    // 	} else if v.role != RoleAdmin {
-    // 		return echo.NewHTTPError(http.StatusForbidden, "admin role required")
-    // 	}
+    var v = await parseViewer(request);
+    if (v.role != RoleAdmin)
+    {
+        throw new IsuHttpException(HttpStatusCode.Forbidden, $"admin role required");
+    }
+    var before = request.Query["before"].FirstOrDefault() ?? "";
+    Int64 beforeID;
+    if (!Int64.TryParse(before, out beforeID))
+    {
+        throw new IsuHttpException(HttpStatusCode.BadRequest, $"failed to parse query parameter 'before': {before}");
+    }
 
-    // 	before := c.QueryParam("before")
-    // 	var beforeID int64
-    // 	if before != "" {
-    // 		var err error
-    // 		beforeID, err = strconv.ParseInt(before, 10, 64)
-    // 		if err != nil {
-    // 			return echo.NewHTTPError(
-    // 				http.StatusBadRequest,
-    // 				fmt.Sprintf("failed to parse query parameter 'before': %s", err.Error()),
-    // 			)
-    // 		}
-    // 	}
-    // 	// テナントごとに
-    // 	//   大会ごとに
-    // 	//     scoreが登録されているplayer * 100
-    // 	//     scoreが登録されていないplayerでアクセスした人 * 10
-    // 	//   を合計したものを
-    // 	// テナントの課金とする
-    // 	ts := []TenantRow{}
-    // 	if err := adminDB.SelectContext(ctx, &ts, "SELECT * FROM tenant ORDER BY id DESC"); err != nil {
-    // 		return fmt.Errorf("error Select tenant: %w", err)
-    // 	}
-    // 	tenantBillings := make([]TenantWithBilling, 0, len(ts))
-    // 	for _, t := range ts {
-    // 		if beforeID != 0 && beforeID <= t.ID {
-    // 			continue
-    // 		}
-    // 		err := func(t TenantRow) error {
-    // 			tb := TenantWithBilling{
-    // 				ID:          strconv.FormatInt(t.ID, 10),
-    // 				Name:        t.Name,
-    // 				DisplayName: t.DisplayName,
-    // 			}
-    // 			tenantDB, err := connectToTenantDB(t.ID)
-    // 			if err != nil {
-    // 				return fmt.Errorf("failed to connectToTenantDB: %w", err)
-    // 			}
-    // 			defer tenantDB.Close()
-    // 			cs := []CompetitionRow{}
-    // 			if err := tenantDB.SelectContext(
-    // 				ctx,
-    // 				&cs,
-    // 				"SELECT * FROM competition WHERE tenant_id=?",
-    // 				t.ID,
-    // 			); err != nil {
-    // 				return fmt.Errorf("failed to Select competition: %w", err)
-    // 			}
-    // 			for _, comp := range cs {
-    // 				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
-    // 				if err != nil {
-    // 					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
-    // 				}
-    // 				tb.BillingYen += report.BillingYen
-    // 			}
-    // 			tenantBillings = append(tenantBillings, tb)
-    // 			return nil
-    // 		}(t)
-    // 		if err != nil {
-    // 			return err
-    // 		}
-    // 		if len(tenantBillings) >= 10 {
-    // 			break
-    // 		}
-    // 	}
-    // 	return c.JSON(http.StatusOK, SuccessResult{
-    // 		Status: true,
-    // 		Data: TenantsBillingHandlerResult{
-    // 			Tenants: tenantBillings,
-    // 		},
-    // 	})
-    return;
+    // テナントごとに
+    //   大会ごとに
+    //     scoreが登録されているplayer * 100
+    //     scoreが登録されていないplayerでアクセスした人 * 10
+    //   を合計したものを
+    // テナントの課金とする
+    var tenantBillings = new List<TenantWithBilling>();
+    using var adminDB = connectAdminDB();
+    var ts = adminDB.Query<TenantRow>("SELECT * FROM tenant ORDER BY id DESC").ToList();
+    foreach (var t in ts)
+    {
+        if (beforeID != 0 && beforeID <= t.ID) { continue; }
+        var byen = 0L;
+        using var tenantDB = connectToTenantDB(t.ID);
+        var cs = tenantDB.Query<CompetitionRow>("SELECT * FROM competition WHERE tenant_id=@Id", new { Id = t.ID }).ToList();
+        foreach (var comp in cs)
+        {
+            var report = billingReportByCompetition(tenantDB, t.ID, comp.ID);
+            byen += report.BillingYen;
+        }
+
+        tenantBillings.Add(new TenantWithBilling(ID: t.ID.ToString(), Name: t.Name, DisplayName: t.DisplayName, BillingYen: byen));
+        if (tenantBillings.Count > 10) { break; }
+    }
+
+    return new SuccessResult<TenantsBillingHandlerResult>(
+        Status: true,
+        Data: new TenantsBillingHandlerResult(
+            Tenants: tenantBillings));
 }
 
 
@@ -1581,7 +1519,9 @@ class IsuHttpException : Exception
 // {"aud":["admin"],"exp":1659978506,"iss":"isuports","role":"admin","sub":"admin"}
 record Token(string[] Aud, Int64 Exp, string Iss, string Role, string Sub) { }
 
-record TenantRow(Int64 Id, string Name, string DisplayName, Int64 CreatedAt, Int64 UpdatedAt) { }
+record TenantRow(Int64 ID, string Name, string DisplayName, Int64 CreatedAt, Int64 UpdatedAt) { }
+
+record CompetitionRow(Int64 TenantID, string ID, string Title, Int64? FinishedAt, Int64 CreatedAt, Int64 UpdatedAt) { }
 
 // type dbOrTx interface {
 // 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
@@ -1597,6 +1537,28 @@ record TenantRow(Int64 Id, string Name, string DisplayName, Int64 CreatedAt, Int
 // 	CreatedAt      int64  `db:"created_at"`
 // 	UpdatedAt      int64  `db:"updated_at"`
 // }
+
+record BillingReport(
+    [property: JsonPropertyName("competition_id")] string CompetitionID,
+    [property: JsonPropertyName("competition_title")] string CompetitionTitle,
+    // スコアを登録した参加者数
+    [property: JsonPropertyName("player_count")] Int64 PlayerCount,
+    // ランキングを閲覧だけした(スコアを登録していない)参加者数
+    [property: JsonPropertyName("visitor_count")] Int64 VisitorCount,
+    // 請求金額 スコアを登録した参加者分
+    [property: JsonPropertyName("billing_player_yen")] Int64 BillingPlayerYen,
+    // 請求金額 ランキングを閲覧だけした(スコアを登録していない)参加者分
+    [property: JsonPropertyName("billing_visitor_yen")] Int64 BillingVisitorYen,
+    // 合計請求金額
+    [property: JsonPropertyName("billing_yen")] Int64 BillingYen)
+{ }
+
+record VisitHistoryRow(string PlayerID, Int64 TenantID, string CompetitionID, Int64 CreatedAt, Int64 UpdatedAt) { }
+
+record VisitHistorySummaryRow(
+    [property: JsonPropertyName("player_id")] string PlayerID,
+    [property: JsonPropertyName("min_created_at")] Int64 MinCreatedAt)
+{ }
 
 // アクセスしてきた人の情報
 record Viewer(string role, string playerID, string tenantName, Int64 tenantID) { }
@@ -1616,14 +1578,8 @@ record SuccessResult<T>(bool Status, T Data) { };
 record FailureResult(bool Status, string Message) { };
 
 record MeHandlerResult(TenantDetail Tenant, PlayerDetail Me, string Role, bool LoggedIn) { }
-
-// type TenantsBillingHandlerResult struct {
-// 	Tenants []TenantWithBilling `json:"tenants"`
-// }
-
-// type PlayersListHandlerResult struct {
-// 	Players []PlayerDetail `json:"players"`
-// }
+record TenantsBillingHandlerResult(IList<TenantWithBilling> Tenants) { }
+record PlayersListHandlerResult(IList<PlayerDetail> Players) { }
 
 record TenantsAddHandlerResult(TenantWithBilling Tenant) { }
 
